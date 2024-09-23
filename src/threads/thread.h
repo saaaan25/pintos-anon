@@ -24,6 +24,11 @@ typedef int tid_t;
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
 
+/* Definiciones para el uso de la CPU reciente y el valor nice. */
+#define NICE_DEFAULT 0                  /* Valor nice por defecto. */
+#define RECENT_CPU_DEFAULT 0            /* Valor default para recent_cpu. */
+#define LOAD_AVG_DEFAULT 0              /* Valor default para load_avg. */
+
 /* A kernel thread or user process.
 
    Each thread structure is stored in its own 4 kB page.  The
@@ -90,6 +95,10 @@ struct thread
     int priority;                       /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
 
+    /* Atributos para el scheduler avanzado basado en 4BSD. */
+    int nice;                           /* Valor nice que afecta la prioridad. */
+    int recent_cpu;                     /* Uso reciente de la CPU por parte del hilo. */
+
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
@@ -101,6 +110,9 @@ struct thread
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
+
+/* Variable global que almacena el promedio de carga del sistema. */
+extern int load_avg;                    /* Promedio de carga del sistema. */
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -130,9 +142,11 @@ void thread_yield (void);
 typedef void thread_action_func (struct thread *t, void *aux);
 void thread_foreach (thread_action_func *, void *);
 
+/* Priority handling. */
 int thread_get_priority (void);
 void thread_set_priority (int);
 
+/* Funciones para manejar los valores nice, recent_cpu y load_avg. */
 int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
