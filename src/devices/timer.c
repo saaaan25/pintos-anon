@@ -7,10 +7,7 @@
 #include "threads/interrupt.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
-
-// Librería para listas, que nos ayudará a manejar la lista de hilos durmientes.
-#include "list.h"
-
+  
 /* See [8254] for hardware details of the 8254 timer chip. */
 
 #if TIMER_FREQ < 19
@@ -23,10 +20,8 @@
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
 
-/* Lista de hilos que están durmiendo. Esta lista almacena los hilos que están en espera para despertar. */
-static struct list sleeping_threads;
-
-/* Número de loops por tick de temporizador. Inicializado por timer_calibrate(). */
+/* Number of loops per timer tick.
+   Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
 
 static intr_handler_func timer_interrupt;
@@ -35,13 +30,6 @@ static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
 
-// Estructura para almacenar los hilos que están durmiendo.
-struct sleep_thread {
-   struct thread *t;        // Hilo que está durmiendo.
-   int64_t wake_up_time;    // Tiempo en que debe despertarse.
-   struct list_elem elem;   // Elemento para mantener el hilo en la lista.
-};
-
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void
@@ -49,9 +37,6 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
-
-  // Inicializar la lista de hilos durmientes.
-  list_init(&sleeping_threads);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -99,71 +84,65 @@ timer_elapsed (int64_t then)
   return timer_ticks () - then;
 }
 
-/* Sleeps for approximately TICKS timer ticks. Interrupts must be turned on.
-   EDITAR: Reescribimos la función para hacer que los hilos se duerman sin usar busy waiting. */
+bool cmp_wake_time(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) {
+  const struct thread *thread_a = list_entry(a, struct thread, elem);
+  const struct thread *thread_b = list_entry(b, struct thread, elem);
+  return thread_a->wake_time < thread_b->wake_time;
+}
+
+
+/* Sleeps for approximately TICKS timer ticks.  Interrupts must
+   be turned on. */
 void
 timer_sleep (int64_t ticks) 
 {
-  if (ticks <= 0) 
-    return;  // No hace nada si los ticks son negativos o cero.
+  if (ticks <= 0) return;
 
-  int64_t start = timer_ticks ();  // Captura el tiempo actual.
+  int64_t start = timer_ticks(); // Obtener tiempo actual en ticks
+  struct thread *cur = thread_current();
 
-  // Verificar que las interrupciones están activadas.
-  ASSERT (intr_get_level () == INTR_ON);
-
-  // Crear una estructura para almacenar el hilo que va a dormir.
-  struct sleep_thread st;
-  st.t = thread_current();  // Obtener el hilo actual.
-  st.wake_up_time = start + ticks;  // Calcular el tiempo en que debe despertarse.
-
-  // Desactivar las interrupciones para evitar condiciones de carrera al modificar la lista.
+  // Deshabilitar interrupciones para evitar condiciones de carrera
   enum intr_level old_level = intr_disable();
 
-  // Insertar el hilo en la lista de hilos durmientes, ordenado por el tiempo de despertar.
-  list_insert_ordered(&sleeping_threads, &st.elem, cmp_wake_time, NULL);
+  cur->wake_time = start + ticks; // Calcular tiempo de despertar
+  list_insert_ordered(&sleep_list, &cur->elem, cmp_wake_time, NULL); // Insertar en lista de dormidos
+  
+  thread_block(); // Bloquear el hilo actual hasta que llegue su momento de despertar
 
-  // Bloquear el hilo para que deje de ejecutarse hasta que se despierte.
-  thread_block();
-
-  // Restaurar el estado previo de las interrupciones.
-  intr_set_level(old_level);
+  intr_set_level(old_level); // Restaurar el nivel de interrupción
 }
 
-/* Función que compara los tiempos de despertar para ordenar los hilos en la lista. */
-bool cmp_wake_time(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) {
-    const struct sleep_thread *st_a = list_entry(a, struct sleep_thread, elem);
-    const struct sleep_thread *st_b = list_entry(b, struct sleep_thread, elem);
-    return st_a->wake_up_time < st_b->wake_up_time;
-}
 
-/* Sleeps for approximately MS milliseconds. Interrupts must be turned on. */
+/* Sleeps for approximately MS milliseconds.  Interrupts must be
+   turned on. */
 void
 timer_msleep (int64_t ms) 
 {
   real_time_sleep (ms, 1000);
 }
 
-/* Sleeps for approximately US microseconds. Interrupts must be turned on. */
+/* Sleeps for approximately US microseconds.  Interrupts must be
+   turned on. */
 void
 timer_usleep (int64_t us) 
 {
   real_time_sleep (us, 1000 * 1000);
 }
 
-/* Sleeps for approximately NS nanoseconds. Interrupts must be turned on. */
+/* Sleeps for approximately NS nanoseconds.  Interrupts must be
+   turned on. */
 void
 timer_nsleep (int64_t ns) 
 {
   real_time_sleep (ns, 1000 * 1000 * 1000);
 }
 
-/* Busy-waits for approximately MS milliseconds. Interrupts need
+/* Busy-waits for approximately MS milliseconds.  Interrupts need
    not be turned on.
 
    Busy waiting wastes CPU cycles, and busy waiting with
    interrupts off for the interval between timer ticks or longer
-   will cause timer ticks to be lost. Thus, use timer_msleep()
+   will cause timer ticks to be lost.  Thus, use timer_msleep()
    instead if interrupts are enabled. */
 void
 timer_mdelay (int64_t ms) 
@@ -171,12 +150,12 @@ timer_mdelay (int64_t ms)
   real_time_delay (ms, 1000);
 }
 
-/* Busy-wait for approximately US microseconds. Interrupts need not
+/* Sleeps for approximately US microseconds.  Interrupts need not
    be turned on.
 
    Busy waiting wastes CPU cycles, and busy waiting with
    interrupts off for the interval between timer ticks or longer
-   will cause timer ticks to be lost. Thus, use timer_usleep()
+   will cause timer ticks to be lost.  Thus, use timer_usleep()
    instead if interrupts are enabled. */
 void
 timer_udelay (int64_t us) 
@@ -184,11 +163,12 @@ timer_udelay (int64_t us)
   real_time_delay (us, 1000 * 1000);
 }
 
-/* Busy-wait for approximately NS nanoseconds. Interrupts need not be turned on.
+/* Sleeps execution for approximately NS nanoseconds.  Interrupts
+   need not be turned on.
 
    Busy waiting wastes CPU cycles, and busy waiting with
    interrupts off for the interval between timer ticks or longer
-   will cause timer ticks to be lost. Thus, use timer_nsleep()
+   will cause timer ticks to be lost.  Thus, use timer_nsleep()
    instead if interrupts are enabled.*/
 void
 timer_ndelay (int64_t ns) 
@@ -202,25 +182,26 @@ timer_print_stats (void)
 {
   printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
 }
-
-/* Timer interrupt handler. EDITAR: Añadimos la lógica para despertar hilos durmientes. */
-static void
+
+/* Timer interrupt handler. */
+void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
-  ticks++;  // Incrementa el contador de ticks.
-  thread_tick();  // Llama a la función para manejar ticks del hilo actual.
+  ticks++;
+  thread_tick();
 
-  // Revisar la lista de hilos durmientes y despertar los que correspondan.
-  while (!list_empty(&sleeping_threads)) {
-    struct sleep_thread *st = list_entry(list_front(&sleeping_threads), struct sleep_thread, elem);
-    
-    if (st->wake_up_time > ticks)  // Si el tiempo de despertar aún no ha llegado, salir.
+  // Despertar los hilos cuyo tiempo de despertar ha llegado
+  while (!list_empty(&sleep_list)) {
+    struct thread *t = list_entry(list_front(&sleep_list), struct thread, elem);
+
+    if (t->wake_time > ticks) // Si el primer hilo en la lista aún debe dormir, salir del bucle
       break;
 
-    list_pop_front(&sleeping_threads);  // Sacar el hilo de la lista.
-    thread_unblock(st->t);  // Despertar el hilo.
+    list_pop_front(&sleep_list); // Despertar el hilo
+    thread_unblock(t);
   }
 }
+
 
 /* Returns true if LOOPS iterations waits for more than one timer
    tick, otherwise false. */

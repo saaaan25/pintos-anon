@@ -15,10 +15,10 @@
 #include "userprog/process.h"
 #endif
 
+/* Random value for struct thread's `magic' member.
+   Used to detect stack overflow.  See the big comment at the top
+   of thread.h for details. */
 #define THREAD_MAGIC 0xcd6abf4b
-
-/* Función que compara prioridades. */
-static bool cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
 
 /* List of processes in THREAD_READY state, that is, processes
    that are ready to run but not actually running. */
@@ -39,11 +39,11 @@ static struct lock tid_lock;
 
 /* Stack frame for kernel_thread(). */
 struct kernel_thread_frame 
-{
+  {
     void *eip;                  /* Return address. */
     thread_func *function;      /* Function to call. */
     void *aux;                  /* Auxiliary data for function. */
-};
+  };
 
 /* Statistics. */
 static long long idle_ticks;    /* # of timer ticks spent idle. */
@@ -58,6 +58,38 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
+
+void mlfqs_init(void) {
+  load_avg = LOAD_AVG_DEFAULT;
+}
+
+/* Actualiza load_avg cada segundo */
+void mlfqs_update_load_avg(void) {
+  int ready_threads = list_size(&ready_list);
+  if (thread_current() != idle_thread) {
+    ready_threads++;
+  }
+  load_avg = FP_ADD(FP_DIV_INT(FP_MUL_INT(load_avg, 59), 60), FP_DIV_INT(INT_TO_FP(ready_threads), 60));
+}
+
+void mlfqs_update_recent_cpu(struct thread *t) {
+  if (t != idle_thread) {
+    fixed_point_t coeff = FP_DIV(FP_MUL_INT(load_avg, 2), FP_ADD_INT(FP_MUL_INT(load_avg, 2), 1));
+    t->recent_cpu = FP_ADD_INT(FP_MUL(coeff, t->recent_cpu), t->nice);
+  }
+}
+
+void mlfqs_recalculate_priority(struct thread *t) {
+  if (t != idle_thread) {
+    t->priority = PRI_MAX - FP_INT_PART(FP_DIV_INT(t->recent_cpu, 4)) - (t->nice * 2);
+    if (t->priority > PRI_MAX) {
+      t->priority = PRI_MAX;
+    } else if (t->priority < PRI_MIN) {
+      t->priority = PRI_MIN;
+    }
+  }
+}
+
 
 static void kernel_thread (thread_func *, void *aux);
 
@@ -159,7 +191,9 @@ thread_print_stats (void)
    scheduled.  Use a semaphore or some other form of
    synchronization if you need to ensure ordering.
 
-   Se añadirá la lógica de planificación por prioridades. */
+   The code provided sets the new thread's `priority' member to
+   PRIORITY, but no actual priority scheduling is implemented.
+   Priority scheduling is the goal of Problem 1-3. */
 tid_t
 thread_create (const char *name, int priority,
                thread_func *function, void *aux) 
@@ -196,24 +230,10 @@ thread_create (const char *name, int priority,
   sf->eip = switch_entry;
   sf->ebp = 0;
 
-  /* Insertar el nuevo hilo en la lista de listos de forma ordenada por prioridad. */
+  /* Add to run queue. */
   thread_unblock (t);
 
-  /* Verificar si el hilo creado tiene mayor prioridad que el hilo actual.
-     Si es así, hacer que el hilo actual ceda la CPU. */
-  if (t->priority > thread_current()->priority) {
-    thread_yield();  // Ceder la CPU si la nueva prioridad es mayor.
-  }
-
   return tid;
-}
-
-/* Función que compara prioridades entre dos hilos.
-   Se utiliza para mantener la lista de listos ordenada por prioridad. */
-static bool cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) {
-  const struct thread *t_a = list_entry(a, struct thread, elem);
-  const struct thread *t_b = list_entry(b, struct thread, elem);
-  return t_a->priority > t_b->priority;  // Retornar true si el primer hilo tiene mayor prioridad.
 }
 
 /* Puts the current thread to sleep.  It will not be scheduled
@@ -236,27 +256,83 @@ thread_block (void)
    This is an error if T is not blocked.  (Use thread_yield() to
    make the running thread ready.)
 
-   Se añadirá la lógica de prioridades para ordenar la lista de listos. */
-void
-thread_unblock (struct thread *t) 
-{
-  enum intr_level old_level;
+   This function does not preempt the running thread.  This can
+   be important: if the caller had disabled interrupts itself,
+   it may expect that it can atomically unblock a thread and
+   update other data. */
 
-  ASSERT (is_thread (t));
+/* Compara las prioridades de dos hilos. */
+bool cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) {
+  struct thread *t_a = list_entry(a, struct thread, elem);
+  struct thread *t_b = list_entry(b, struct thread, elem);
+  return t_a->priority > t_b->priority;
+}
 
-  old_level = intr_disable ();
-  ASSERT (t->status == THREAD_BLOCKED);
+/* Desbloquea un hilo y lo inserta en la lista de hilos listos en orden de prioridad */
+void thread_unblock(struct thread *t) {
+  ASSERT(is_thread(t));
+  ASSERT(intr_get_level() == INTR_OFF);
 
-  /* Insertar el hilo en la lista de listos en función de su prioridad. */
-  list_insert_ordered(&ready_list, &t->elem, cmp_priority, NULL);
   t->status = THREAD_READY;
-  intr_set_level (old_level);
+  list_insert_ordered(&ready_list, &t->elem, cmp_priority, NULL);
+}
+
+/* Returns the name of the running thread. */
+const char *
+thread_name (void) 
+{
+  return thread_current ()->name;
+}
+
+/* Returns the running thread.
+   This is running_thread() plus a couple of sanity checks.
+   See the big comment at the top of thread.h for details. */
+struct thread *
+thread_current (void) 
+{
+  struct thread *t = running_thread ();
+  
+  /* Make sure T is really a thread.
+     If either of these assertions fire, then your thread may
+     have overflowed its stack.  Each thread has less than 4 kB
+     of stack, so a few big automatic arrays or moderate
+     recursion can cause stack overflow. */
+  ASSERT (is_thread (t));
+  ASSERT (t->status == THREAD_RUNNING);
+
+  return t;
+}
+
+/* Returns the running thread's tid. */
+tid_t
+thread_tid (void) 
+{
+  return thread_current ()->tid;
+}
+
+/* Deschedules the current thread and destroys it.  Never
+   returns to the caller. */
+void
+thread_exit (void) 
+{
+  ASSERT (!intr_context ());
+
+#ifdef USERPROG
+  process_exit ();
+#endif
+
+  /* Remove thread from all threads list, set our status to dying,
+     and schedule another process.  That process will destroy us
+     when it calls thread_schedule_tail(). */
+  intr_disable ();
+  list_remove (&thread_current()->allelem);
+  thread_current ()->status = THREAD_DYING;
+  schedule ();
+  NOT_REACHED ();
 }
 
 /* Yields the CPU.  The current thread is not put to sleep and
-   may be scheduled again immediately at the scheduler's whim.
-
-   Se modificará para respetar la planificación por prioridades. */
+   may be scheduled again immediately at the scheduler's whim. */
 void
 thread_yield (void) 
 {
@@ -267,31 +343,45 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    /* Añadir el hilo actual a la lista de listos en orden de prioridad. */
-    list_insert_ordered(&ready_list, &cur->elem, cmp_priority, NULL);
-
+    list_push_back (&ready_list, &cur->elem);
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
 }
 
-/* Sets the current thread's priority to NEW_PRIORITY. */
+/* Invoke function 'func' on all threads, passing along 'aux'.
+   This function must be called with interrupts off. */
 void
-thread_set_priority (int new_priority) 
+thread_foreach (thread_action_func *func, void *aux)
 {
-  thread_current ()->priority = new_priority;
+  struct list_elem *e;
 
-  /* Después de cambiar la prioridad, ceder la CPU si otro hilo tiene mayor prioridad. */
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+       e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      func (t, aux);
+    }
+}
+
+/* Sets the current thread's priority to NEW_PRIORITY. */
+/* Establece la prioridad de un hilo y hace yield si es necesario. */
+void thread_set_priority(int new_priority) {
+  struct thread *curr = thread_current();
+  curr->priority = new_priority;
+  curr->original_priority = new_priority;
+
+  /* Si hay un hilo con mayor prioridad en ready_list, cede el CPU */
   if (!list_empty(&ready_list) && new_priority < list_entry(list_front(&ready_list), struct thread, elem)->priority) {
-    thread_yield();  // Ceder la CPU si la prioridad actual es menor que la del siguiente en la lista.
+    thread_yield();
   }
 }
 
-/* Returns the current thread's priority. */
-int
-thread_get_priority (void) 
-{
-  return thread_current ()->priority;
+/* Obtiene la prioridad actual del hilo que llama */
+int thread_get_priority(void) {
+  return thread_current()->priority;
 }
 
 /* Sets the current thread's nice value to NICE. */

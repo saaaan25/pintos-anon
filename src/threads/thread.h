@@ -24,10 +24,8 @@ typedef int tid_t;
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
 
-/* Definiciones para el uso de la CPU reciente y el valor nice. */
-#define NICE_DEFAULT 0                  /* Valor nice por defecto. */
-#define RECENT_CPU_DEFAULT 0            /* Valor default para recent_cpu. */
-#define LOAD_AVG_DEFAULT 0              /* Valor default para load_avg. */
+#define LOAD_AVG_DEFAULT 0
+#define RECENT_CPU_DEFAULT 0
 
 /* A kernel thread or user process.
 
@@ -92,15 +90,15 @@ struct thread
     enum thread_status status;          /* Thread state. */
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
-    int priority;                       /* Priority. */
-    struct list_elem allelem;           /* List element for all threads list. */
-
-    /* Atributos para el scheduler avanzado basado en 4BSD. */
-    int nice;                           /* Valor nice que afecta la prioridad. */
-    int recent_cpu;                     /* Uso reciente de la CPU por parte del hilo. */
+    int recent_cpu;               /* Tiempo reciente de CPU consumido */
+    int nice;
+    int priority;          /* List element for all threads list. */
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
+    int original_priority;        /* Prioridad original antes de donación */
+    struct list_elem allelem;     /* Elemento de la lista de todos los hilos */
+
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
@@ -111,13 +109,19 @@ struct thread
     unsigned magic;                     /* Detects stack overflow. */
   };
 
-/* Variable global que almacena el promedio de carga del sistema. */
-extern int load_avg;                    /* Promedio de carga del sistema. */
-
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
+
+/* Variables globales para el scheduler 4BSD */
+fixed_point_t load_avg;         /* Promedio de carga del sistema */
+
+/* Prototipos de funciones para el scheduler basado en 4BSD */
+void mlfqs_init(void);
+void mlfqs_update_load_avg(void);
+void mlfqs_update_recent_cpu(struct thread *t);
+void mlfqs_recalculate_priority(struct thread *t);
 
 void thread_init (void);
 void thread_start (void);
@@ -142,11 +146,11 @@ void thread_yield (void);
 typedef void thread_action_func (struct thread *t, void *aux);
 void thread_foreach (thread_action_func *, void *);
 
-/* Priority handling. */
 int thread_get_priority (void);
 void thread_set_priority (int);
+void priority_donate(struct thread *t, int new_priority);
+bool cmp_priority(const struct list_elem *a, const struct list_elem *b, void *aux);
 
-/* Funciones para manejar los valores nice, recent_cpu y load_avg. */
 int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
